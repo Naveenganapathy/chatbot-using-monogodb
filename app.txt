@@ -1,0 +1,80 @@
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_ollama import OllamaLLM
+from pymongo import MongoClient
+import streamlit as st
+from dotenv import load_dotenv
+import os
+
+# Load environment variables
+load_dotenv()
+mongo_uri = os.getenv("MONGO_URI")
+
+# Streamlit App Title
+st.title("🤖 Volunteer Connect Show Chat Bot")
+
+# User input
+input_txt = st.text_input("💬 Please enter your queries here...")
+
+# MongoDB connection
+client = MongoClient(mongo_uri)
+db = client["volunteer"]
+collection = db["volunteer_roles"]
+
+# Function to search MongoDB based on user input
+def search_roles(query):
+    keywords = query.lower().split()
+    regex_clauses = [
+        {"title": {"$regex": kw, "$options": "i"}} for kw in keywords
+    ] + [
+        {"description": {"$regex": kw, "$options": "i"}} for kw in keywords
+    ] + [
+        {"location": {"$regex": kw, "$options": "i"}} for kw in keywords
+    ] + [
+        {"target_group": {"$regex": kw, "$options": "i"}} for kw in keywords
+    ]
+    return list(collection.find({"$or": regex_clauses}))
+
+# Format MongoDB documents for LLM display
+def format_roles(matches):
+    return "\n\n".join([
+        f"📌 **{doc.get('title', 'N/A')}**\n"
+        f"📝 {doc.get('description', 'No description')}\n"
+        f"📍 Location: {doc.get('location', 'Unknown')}\n"
+        f"📅 Date: {str(doc.get('date', 'No date'))[:10]}\n"
+        f"🔗 [Join WhatsApp]({doc.get('whatsappGroupLink', 'No link provided')})"
+        for doc in matches
+    ])
+
+# Prompt setup
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are Volunteer Connect Assistant. ONLY respond using the roles shown below. If none match, just say that. NEVER make up opportunities."),
+    ("user", "{query}")
+])
+
+# LLM chain setup
+llm = OllamaLLM(model="tinyllama")
+output_parser = StrOutputParser()
+chain = prompt | llm | output_parser
+
+# Main chatbot interaction
+if input_txt:
+    matches = search_roles(input_txt)
+
+    # Optional: show raw results in sidebar
+    with st.sidebar:
+        st.subheader("🔍 Raw MongoDB Matches")
+        st.write(matches)
+
+    formatted_data = format_roles(matches) if matches else "❌ No matching roles found in the database."
+
+    final_prompt = (
+        f'The user asked: "{input_txt}"\n\n'
+        f"Here are the matching volunteering roles from the database:\n\n"
+        f"{formatted_data}\n\n"
+        f"IMPORTANT: Use ONLY this data to answer the user's question. If no roles are relevant, say so clearly."
+    )
+
+    response = chain.invoke({"query": final_prompt})
+    st.markdown(response)
+
